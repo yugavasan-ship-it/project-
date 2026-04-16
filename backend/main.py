@@ -197,7 +197,41 @@ def apply_leave(leave: schemas.LeaveApply, db: Session = Depends(get_db), curren
     
     # Trigger AI auto reassignment with weekly off consideration
     ai_scheduler.handle_leave_request(db, emp.id, leave.date)
-    return {"msg": f"Leave applied for {emp.name} on {leave.date}. AI automatically handled replacement and weekly off swap."}
+    
+    # Get current schedule for the leave date to show replacements
+    schedules = db.query(Schedule).filter(Schedule.date == leave.date).all()
+    replacement_info = []
+    for sched in schedules:
+        replacement_emp = db.query(Employee).filter(Employee.id == sched.employee_id).first()
+        shift = db.query(Shift).filter(Shift.id == sched.shift_id).first()
+        replacement_info.append({
+            "employee_name": replacement_emp.name,
+            "employee_id": replacement_emp.emp_id,
+            "shift": shift.name,
+            "shift_time": f"{shift.start_time}-{shift.end_time}"
+        })
+    
+    return {
+        "msg": f"Leave applied for {emp.name} on {leave.date}. AI automatically handled replacement and weekly off swap.",
+        "replacements": replacement_info
+    }
+
+@app.delete("/cancel-leave")
+def cancel_leave(employee_name: str, date: str, db: Session = Depends(get_db), current_user: User = Depends(require_role(["supervisor", "manager", "admin"]))):
+    emp = db.query(Employee).filter(Employee.name == employee_name).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    leave = db.query(Leave).filter(Leave.employee_id == emp.id, Leave.date == date).first()
+    if not leave:
+        raise HTTPException(status_code=404, detail="Leave not found")
+    
+    db.delete(leave)
+    db.commit()
+    
+    # Trigger AI to handle leave cancellation and weekly off transfer
+    ai_scheduler.handle_leave_cancellation(db, emp.id, date)
+    return {"msg": f"Leave cancelled for {emp.name} on {date}. AI handled weekly off transfer."}
 
 @app.put("/update-schedule")
 def update_schedule(data: schemas.ScheduleUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_role(["manager", "admin"]))):

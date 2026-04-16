@@ -11,6 +11,7 @@ export default function Leaves() {
   const [leaves, setLeaves] = useState([]);
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState('');
+  const [replacements, setReplacements] = useState([]);
   const today = new Date().toISOString().split('T')[0];
   const navigate = useNavigate();
   const role = localStorage.getItem('role') || 'User';
@@ -38,14 +39,16 @@ export default function Leaves() {
   const handleApplyLeave = async (e) => {
     e.preventDefault();
     setMsg('');
+    setReplacements([]);
     const currentToken = localStorage.getItem('token');
     if (!currentToken) return navigate('/login');
     try {
-      await axios.post(`${API_URL}/apply-leave`, 
+      const res = await axios.post(`${API_URL}/apply-leave`, 
         { employee_name: leaveName, date: today },
         { headers: { Authorization: `Bearer ${currentToken}` } }
       );
-      setMsg('Leave processed and shifts automatically reassigned by AI.');
+      setMsg(res.data.msg);
+      setReplacements(res.data.replacements || []);
       setLeaveName('');
       fetchLeaves();
     } catch (error) {
@@ -57,6 +60,46 @@ export default function Leaves() {
   return (
     <DashboardLayout title="Leave Management" role={role.charAt(0).toUpperCase() + role.slice(1)}>
       {msg && <AlertPanel title="AI Action" message={msg} type={msg.includes('Error') ? 'danger' : 'success'} />}
+      
+      {replacements.length > 0 && (
+        <div className="card" style={{ marginBottom: '24px', background: '#ecfdf5', border: '1px solid #10b981' }}>
+          <div className="card-title" style={{ color: '#065f46' }}>
+            <span>Replacement Information</span>
+          </div>
+          <p style={{ fontSize: '13px', color: '#065f46', marginBottom: '12px' }}>AI assigned the following employees to replace the leave request:</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {replacements.map((r, idx) => (
+              <div key={idx} style={{ 
+                padding: '10px 12px', 
+                background: '#fff', 
+                borderRadius: '6px',
+                border: '1px solid #10b981',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+              }}>
+                <div>
+                  <span style={{ fontWeight: 600, color: '#065f46' }}>{r.employee_name}</span>
+                  <span style={{ color: '#6b7280', marginLeft: '8px' }}>({r.employee_id})</span>
+                </div>
+                <div>
+                  <span style={{ 
+                    padding: '4px 8px', 
+                    background: '#10b981', 
+                    color: 'white', 
+                    borderRadius: '4px', 
+                    fontSize: '12px',
+                    fontWeight: 500
+                  }}>
+                    {r.shift}
+                  </span>
+                  <span style={{ color: '#6b7280', marginLeft: '8px', fontSize: '12px' }}>{r.shift_time}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       
       <div className="card">
         <div className="card-title">

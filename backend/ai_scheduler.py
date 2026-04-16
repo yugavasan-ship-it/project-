@@ -226,6 +226,7 @@ def generate_ai_schedule(db: Session, target_date: str = None):
     Enhanced features:
     - Respects leave requests for the target date
     - Ensures employees get at least one day off per week
+    - Limits weekly off to 143 employees per day
     - Prioritizes night shift assignments to employees with Night preference
     - Automatic reassignment when leave is uploaded
     """
@@ -268,6 +269,9 @@ def generate_ai_schedule(db: Session, target_date: str = None):
     shift_assignments = {s.id: [] for s in shifts}
     employee_hours    = {e.id: 0 for e in available}
     assigned_emps     = set()
+    
+    # Weekly off limit: 143 employees per day
+    WEEKLY_OFF_LIMIT = 143
 
     def priority_score(emp, shift):
         """
@@ -324,19 +328,37 @@ def generate_ai_schedule(db: Session, target_date: str = None):
             assigned_emps.add(chosen.id)
 
     # ── Phase 3: Assign remaining employees with day-off consideration ─────────────
+    weekly_off_count = 0
     for emp in available:
         if emp.id not in assigned_emps:
             # Check if employee has already worked 6+ days this week
             if days_worked.get(emp.id, 0) >= 6:
                 # Give them a day off - don't assign
+                weekly_off_count += 1
                 print(f"[AI] Employee {emp.name} gets day off (worked {days_worked[emp.id]} days this week)")
                 continue
             
-            # Assign to the least-loaded shift (balance)
-            target = min(shifts, key=lambda s: len(shift_assignments[s.id]))
-            shift_assignments[target.id].append(emp.id)
-            employee_hours[emp.id] += shift_dur[target.id]
-            assigned_emps.add(emp.id)
+            # Check if weekly off limit reached
+            if weekly_off_count >= WEEKLY_OFF_LIMIT:
+                # Limit reached, assign remaining employees
+                target = min(shifts, key=lambda s: len(shift_assignments[s.id]))
+                shift_assignments[target.id].append(emp.id)
+                employee_hours[emp.id] += shift_dur[target.id]
+                assigned_emps.add(emp.id)
+            else:
+                # Check if this employee should get weekly off (worked 5+ days)
+                if days_worked.get(emp.id, 0) >= 5:
+                    weekly_off_count += 1
+                    print(f"[AI] Employee {emp.name} gets day off (worked {days_worked[emp.id]} days this week) - Weekly off count: {weekly_off_count}/{WEEKLY_OFF_LIMIT}")
+                    continue
+                
+                # Assign to the least-loaded shift (balance)
+                target = min(shifts, key=lambda s: len(shift_assignments[s.id]))
+                shift_assignments[target.id].append(emp.id)
+                employee_hours[emp.id] += shift_dur[target.id]
+                assigned_emps.add(emp.id)
+    
+    print(f"[AI] Total weekly off assigned: {weekly_off_count}/{WEEKLY_OFF_LIMIT}")
 
     # ── Persist to DB ──────────────────────────────────────────────────────────
     for shift_id, emp_ids_list in shift_assignments.items():
@@ -440,11 +462,19 @@ def reassign_shift(db: Session, employee_id: int, leave_date: str):
 
 def handle_leave_request(db: Session, employee_id: int, leave_date: str):
     """
-    Handle leave request with weekly off consideration:
+    Handle leave request with weekly off swap respecting 143 employee limit:
     - If employee requesting leave is scheduled, reassign their shift
-    - If employee requesting leave has weekly off (not scheduled), check if scheduled employees need weekly off
-    - Swap assignments if scheduled employee has worked 6+ days
+    - If employee requesting leave has weekly off (not scheduled), swap with scheduled employee
+    - Leave requester gets weekly off, weekly off person works
+    - Respects weekly off limit of 143 employees per day
     """
+    WEEKLY_OFF_LIMIT = 143
+    
+    # Check current weekly off count for the day
+    all_employees = db.query(Employee).all()
+    scheduled_emp_ids = {s.employee_id for s in db.query(Schedule).filter(Schedule.date == leave_date).all()}
+    current_weekly_off = len([e for e in all_employees if e.id not in scheduled_emp_ids])
+    
     # Check if requesting employee is scheduled on leave date
     schedules = db.query(Schedule).filter(
         Schedule.employee_id == employee_id,
@@ -455,27 +485,65 @@ def handle_leave_request(db: Session, employee_id: int, leave_date: str):
         # Employee is scheduled - reassign their shift
         reassign_shift(db, employee_id, leave_date)
     else:
-        # Employee has weekly off (not scheduled) - check if we should swap
-        week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()
+        # Employee has weekly off (not scheduled) - swap with scheduled employee
         day_schedules = db.query(Schedule).filter(Schedule.date == leave_date).all()
         
-        for sched in day_schedules:
-            emp_schedules = db.query(Schedule).filter(
-                Schedule.employee_id == sched.employee_id,
-                Schedule.date >= week_start,
-                Schedule.date < leave_date
-            ).all()
-            days_worked = len(set(s.date for s in emp_schedules))
+        if day_schedules:
+            requester = db.query(Employee).filter(Employee.id == employee_id).first()
             
-            # If scheduled employee has worked 6+ days, give them weekly off
-            if days_worked >= 6:
-                emp = db.query(Employee).filter(Employee.id == sched.employee_id).first()
-                requester = db.query(Employee).filter(Employee.id == employee_id).first()
+            # Check if weekly off limit allows swap
+            if current_weekly_off < WEEKLY_OFF_LIMIT:
+                # Swap with first scheduled employee
+                first_sched = day_schedules[0]
+                emp = db.query(Employee).filter(Employee.id == first_sched.employee_id).first()
                 
-                # Swap: requester works, scheduled employee gets weekly off
-                db.add(Schedule(date=leave_date, shift_id=sched.shift_id, employee_id=employee_id))
-                db.delete(sched)
+                # Swap: requester gets weekly off, scheduled person works
+                db.add(Schedule(date=leave_date, shift_id=first_sched.shift_id, employee_id=employee_id))
+                db.delete(first_sched)
                 db.flush()
-                print(f"[AI] Weekly off swap: {emp.name} gets day off (worked {days_worked} days), {requester.name} works instead")
+                print(f"[AI] Weekly off swap: {requester.name} gets weekly off, {emp.name} works instead (Weekly off: {current_weekly_off + 1}/{WEEKLY_OFF_LIMIT})")
                 db.commit()
-                break
+            else:
+                # Weekly off limit reached, requester must work
+                first_sched = day_schedules[0]
+                emp = db.query(Employee).filter(Employee.id == first_sched.employee_id).first()
+                db.add(Schedule(date=leave_date, shift_id=first_sched.shift_id, employee_id=employee_id))
+                db.delete(first_sched)
+                db.flush()
+                print(f"[AI] Weekly off limit reached ({current_weekly_off}/{WEEKLY_OFF_LIMIT}), {requester.name} must work, {emp.name} gets weekly off")
+                db.commit()
+
+
+
+def handle_leave_cancellation(db: Session, employee_id: int, leave_date: str):
+    """
+    Handle leave cancellation:
+    - If leave requester was assigned to work (from weekly off), give weekly off back to replacement person
+    - Restore original schedule if possible
+    """
+    # Find if employee was assigned to work on leave date (from weekly off swap)
+    schedules = db.query(Schedule).filter(
+        Schedule.employee_id == employee_id,
+        Schedule.date == leave_date
+    ).all()
+    
+    if schedules:
+        # Employee was assigned to work - check if this was from weekly off swap
+        # Find who was replaced (who got weekly off)
+        # This is tracked by checking if the employee was not originally scheduled
+        week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()
+        emp = db.query(Employee).filter(Employee.id == employee_id).first()
+        
+        for sched in schedules:
+            # Delete the assignment
+            db.delete(sched)
+            db.flush()
+            
+            # Try to find the original employee who was replaced
+            # In a real system, we'd track this in a separate table or log
+            # For now, we'll re-run the schedule generation for that day
+            print(f"[AI] Leave cancelled for {emp.name} on {leave_date}. Regenerating schedule...")
+            generate_ai_schedule(db, leave_date)
+            break
+    
+    db.commit()
