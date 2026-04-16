@@ -1,0 +1,10 @@
+fastapi: Installed
+uvicorn: Installed
+sqlalchemy: Installed
+jose: Installed
+passlib: Installed
+pandas: Installed
+openpyxl: Installed
+bcrypt: Installed
+Python Version: 3.14.4 (tags/v3.14.4:23116f9, Apr  7 2026, 14:10:54) [MSC v.1944 64 bit (AMD64)]
+Executable: C:\Users\ELCOT\Desktop\project\backend\venv\Scripts\python.exe
